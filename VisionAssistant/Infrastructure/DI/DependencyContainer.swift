@@ -70,11 +70,11 @@ enum AppEnvironment {
     var lmntAPIKey: String {
         switch self {
         case .development:
-            return ProcessInfo.processInfo.environment["LMNT_API_KEY_DEV"] ?? ""
+            return ProcessInfo.processInfo.environment["49e65067edb24abeb176497187325462"] ?? ""
         case .staging:
-            return ProcessInfo.processInfo.environment["LMNT_API_KEY_STAGING"] ?? ""
+            return ProcessInfo.processInfo.environment["49e65067edb24abeb176497187325462"] ?? ""
         case .production:
-            return ProcessInfo.processInfo.environment["LMNT_API_KEY_PROD"] ?? ""
+            return ProcessInfo.processInfo.environment["49e65067edb24abeb176497187325462"] ?? ""
         }
     }
 } 
