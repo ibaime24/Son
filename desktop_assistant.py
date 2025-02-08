@@ -1,5 +1,7 @@
 from dotenv import load_dotenv
 from datetime import datetime
+from elevenlabs.client import ElevenLabs
+from elevenlabs import play
 
 # Load environment variables from .env file
 load_dotenv()
@@ -17,6 +19,12 @@ from openai import OpenAI
 import asyncio
 from lmnt.api import Speech
 
+# Import helper functions
+from helpers.listen_for_question import listen_for_question
+from helpers.capture_photo import capture_photo
+from helpers.process_image_and_question import process_image_and_question
+from helpers.speak_with_elevenlabs import speak_with_elevenlabs
+
 # ------------------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------------------
@@ -25,148 +33,15 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY")
 LMNT_API_KEY = os.getenv("LMNT_API_KEY", "YOUR_LMNT_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
-# Initialize the OpenAI client
-client = OpenAI()
-
 # If you have a local or specialized endpoint (replace or remove this if not needed):
 BACKEND_URL = "http://127.0.0.1:5000/process-image"
 
-# ------------------------------------------------------------------------------
-# Helper: Listen for Question
-# ------------------------------------------------------------------------------
-
-def listen_for_question(timeout: int = 100, phrase_time_limit: int = 100) -> str:
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("Please ask your question. Listening for up to 100 seconds...")
-        audio = r.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
-
-    try:
-        recognized_text = r.recognize_google(audio)
-        print(f"Recognized text: '{recognized_text}'")
-        return recognized_text
-    except sr.UnknownValueError:
-        raise RuntimeError("Speech recognition could not understand audio.")
-    except sr.RequestError as e:
-        raise RuntimeError(f"Could not request results from speech recognition service; {e}")
-
-# ------------------------------------------------------------------------------
-# Helper: Capture Photo
-# ------------------------------------------------------------------------------
-
-def capture_photo() -> str:
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Unable to access the camera.")
-        return None
-
-    ret, frame = cap.read()
-    if not ret:
-        print("Error: Failed to capture image.")
-        cap.release()
-        return None
-
-    photo_path = "desktop_photo.jpg"
-    cv2.imwrite(photo_path, frame)
-    cap.release()
-    print(f"Captured photo and saved to '{photo_path}'.")
-    
-    return photo_path
-
-# ------------------------------------------------------------------------------
-# Helper: Process with OpenAI (Image-Capable Endpoint)
-# ------------------------------------------------------------------------------
-
-def encode_image(image_path: str) -> str:
-    """
-    Read an image from disk and return a base64-encoded string of its binary data.
-    """
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode("utf-8")
-
-def process_image_and_question(image_path: str, question: str) -> str:
-    """
-    Use the GPT-4o-mini model with additional context prompt.
-    """
-    base64_image = encode_image(image_path)
-    
-    # Shorter system context
-    system_context = """You are Son, a concise yet informative vision assistant for the visually impaired. Start descriptions with 'I see'""
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": system_context
-            },
-            {
-                "role": "user", 
-                "content": [
-                    {"type": "text", "text": question},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}",
-                            "detail": "low"  # Change to low unless high detail is needed
-                        }
-                    }
-                ]
-            }
-        ],
-        max_tokens=300  # Reduced from 500
-    )
-
-    return response.choices[0].message.content
-
-# ------------------------------------------------------------------------------
-# Helper: Speak with LMNT
-# ------------------------------------------------------------------------------
-
-async def speak_with_lmnt(text: str):
-    """
-    Use LMNT's async API to synthesize speech from text and play it.
-    """
-    if not LMNT_API_KEY or LMNT_API_KEY == "YOUR_LMNT_API_KEY":
-        print("[Warning] No valid LMNT_API_KEY found. Skipping TTS.")
-        return
-
-    try:
-        async with Speech(LMNT_API_KEY) as speech:
-            synthesis = await speech.synthesize(
-                text=text,
-                voice='lily',
-                format='mp3',
-                speed=1.1  # I currently like this speed 
-            )
-
-            # Save the audio to a temporary file
-            output_file = "response_temp.mp3"
-            with open(output_file, 'wb') as f:
-                f.write(synthesis['audio'])
-
-            # Play the audio using pygame
-            pygame.mixer.init()
-            pygame.mixer.music.load(output_file)
-            pygame.mixer.music.play()
-
-            # Wait for playback to finish
-            while pygame.mixer.music.get_busy():
-                await asyncio.sleep(0.1)
-
-            # Cleanup
-            if os.path.exists(output_file):
-                os.remove(output_file)
-
-    except Exception as e:
-        print(f"[Error] LMNT TTS synthesis failed: {e}")
 
 # ------------------------------------------------------------------------------
 # Main Workflow
 # ------------------------------------------------------------------------------
 
-def log_timing(operation: str, start_time: datetime) -> float:    # for figuringout latency issues. biggest hurdle rn is openai api
+def log_timing(operation: str, start_time: datetime) -> float:
     """Calculate and log the duration of an operation."""
     duration = (datetime.now() - start_time).total_seconds()
     print(f"{operation}: {duration:.2f} seconds")
@@ -199,7 +74,11 @@ async def main():
         log_timing("Camera initialization", camera_start)
 
         print("Son is ready! Say 'stop' to exit.")
-        await speak_with_lmnt("Hi! I'm Son. I'm here to help you navigate the world")
+        
+        # Use ElevenLabs for the intro
+        await speak_with_elevenlabs("Hi! I'm Son. I'm here to help you navigate the world.")
+        
+        print(f"API Key: {os.getenv('ELEVENLABS_API_KEY')}")
         
         while running:   # while loop so it wont stop after one request
             try:
@@ -217,17 +96,7 @@ async def main():
 
                 # 2) Capture a photo
                 photo_start = datetime.now()
-                ret, frame = camera.read()
-                if not ret:
-                    print("Error: Failed to capture image.")
-                    continue
-
-                # Delete previous photo if it exists
-                if photo_path and os.path.exists(photo_path):
-                    os.remove(photo_path)
-
-                photo_path = "desktop_photo.jpg"
-                cv2.imwrite(photo_path, frame)
+                photo_path = capture_photo()
                 photo_duration = log_timing("Photo capture", photo_start)
 
                 # 3) Send the question & image to OpenAI
@@ -237,7 +106,7 @@ async def main():
 
                 # 4) Speak the response with LMNT
                 speech_start = datetime.now()
-                await speak_with_lmnt(answer)
+                await speak_with_elevenlabs(answer)
                 speech_duration = log_timing("Speech synthesis and playback", speech_start)
 
                 # Log total iteration time
@@ -258,6 +127,9 @@ async def main():
                 print("Ready for next question...")
                 continue
 
+        # Use ElevenLabs for the outro
+        await speak_with_elevenlabs("Goodbye!")
+
     except Exception as e:
         print(f"[Critical Error] {e}")
     finally:
@@ -268,7 +140,7 @@ async def main():
             os.remove(photo_path)
         total_runtime = log_timing("Total runtime", total_start_time)
         print("Assistant stopped. Goodbye!")
-        await speak_with_lmnt("Goodbye")
+
 # ------------------------------------------------------------------------------
 # Entry Point
 # ------------------------------------------------------------------------------
